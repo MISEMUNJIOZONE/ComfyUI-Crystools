@@ -1,35 +1,7 @@
-# ComfyUI-CrysTool for Strix Halo RDNA3.5 (gfx1151)
-
-## Overview
-ComfyUI-CrysTool with ROCm/AMD GPU monitoring support for 
-AMD Strix Halo (gfx1151 / RDNA3.5) APUs.
-
-Original CrysTool only supported CUDA (NVIDIA). 
-This fork adds ROCm compatibility for AMD GPU monitoring in ComfyUI.
-
-## Changes from original
-- CUDA-only GPU monitoring → ROCm compatible
-- Tested on AMD Ryzen AI Max (Strix Halo / gfx1151)
-- UMA shared memory support
-
-## Keywords
-gfx1151, RDNA3.5, Strix Halo, Ryzen AI Max, AMD APU, 
-ComfyUI, ROCm, GPU monitoring, CrysTool, Linux, Fedora
-
-## Hardware tested
-- AMD Ryzen AI Max (Strix Halo)
-- RDNA3.5 GPU (gfx1151)
-- ROCm 7.2
-- PyTorch 2.11.0+rocm7.2
-- Python 3.12.12
-- Fedora 44
-
-## Related
-- Original: https://github.com/crystian/ComfyUI-Crystools
-
-
-
 # comfyui-crystools [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/crystian77) <a src="https://colab.research.google.com/assets/colab-badge.svg" href="https://colab.research.google.com/drive/1xiTiPmZkcIqNOsLQPO1UNCdJZqgK3U5k?usp=sharing"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open in Colab"></a>
+
+> ✅ ROCm/AMD Strix Halo (gfx1151) support — NVIDIA(CUDA) + AMD(ROCm) both supported
+
 
 **_🪛 A powerful set of tools for your belt when you work with ComfyUI 🪛_**
 
@@ -701,3 +673,36 @@ If for some reason you need to see the logs, you can define the environment vari
 ---
 
 Made with ❤️ by Crystian.
+
+
+
+# ComfyUI-CrysTool for Strix Halo RDNA3.5 (gfx1151)
+
+## Overview
+ComfyUI-CrysTool with ROCm/AMD GPU monitoring support for 
+AMD Strix Halo (gfx1151 / RDNA3.5) APUs.
+
+Original CrysTool only supported CUDA (NVIDIA). 
+This fork adds ROCm compatibility for AMD GPU monitoring in ComfyUI.
+
+## Changes from original
+- CUDA-only GPU monitoring → ROCm compatible
+- Tested on AMD Ryzen AI Max (Strix Halo / gfx1151)
+- UMA shared memory support
+
+## Keywords
+gfx1151, RDNA3.5, Strix Halo, Ryzen AI Max, AMD APU, 
+ComfyUI, ROCm, GPU monitoring, CrysTool, Linux, Fedora
+
+## Hardware tested
+- AMD Ryzen AI Max (Strix Halo)
+- RDNA3.5 GPU (gfx1151)
+- ROCm 7.2
+- PyTorch 2.11.0+rocm7.2
+- Python 3.12.12
+- Fedora 44
+
+## Related
+- Original: https://github.com/crystian/ComfyUI-Crystools
+
+Edited with ❤️ MISEMUNJIOZONE
