@@ -1,3 +1,4 @@
+import logging
 import os
 import platform
 import re
@@ -80,6 +81,8 @@ class CGPUInfo:
         self.jtopInstance = None
         self.pynvml = None
         self.amdsmi = None
+        self.amdsmiHandles = None
+        self.amdsmiActivityAvailable = True
 
         if IS_JETSON:
             # Try to import jtop for Jetson devices
@@ -102,24 +105,34 @@ class CGPUInfo:
                     self.pynvmlLoaded = True
                     logger.info('pynvml (NVIDIA) initialized.')
                 except Exception as e:
-                    logger.error('Could not init pynvml (NVIDIA). ' + str(e))
+                    logger.debug('pynvml (NVIDIA) unavailable, skipping NVIDIA monitoring. ' + str(e))
 
-            if not self.pynvmlLoaded and rocml is not None:
+            if not self.pynvmlLoaded and amdsmi is not None:
                 try:
-                    rocml.smi_initialize()
+                    self._quiet_external_logs(amdsmi.amdsmi_init)
+                    self.amdsmi = amdsmi
+                    self.amdsmiLoaded = True
+                    self.amdsmiHandles = self._get_amdsmi_handles(log_failure=False)
+                    if self.amdsmiHandles:
+                        logger.info('amdsmi initialized.')
+                    else:
+                        logger.info('amdsmi initialized, but no AMD GPU handles were reported. Using fallback monitoring.')
+                        try:
+                            self._quiet_external_logs(amdsmi.amdsmi_shut_down)
+                        except Exception:
+                            pass
+                        self.amdsmi = None
+                        self.amdsmiLoaded = False
+                except Exception as e:
+                    logger.info('Could not init amdsmi, using fallback monitoring. ' + str(e))
+
+            if not self.pynvmlLoaded and (not self.amdsmiLoaded or not self._get_amdsmi_handles()) and rocml is not None:
+                try:
+                    self._quiet_external_logs(rocml.smi_initialize)
                     self.pyamdLoaded = True
                     logger.info('pyrsmi (AMD/ROCm) initialized.')
                 except Exception as e:
-                    logger.error('Could not init pyrsmi (AMD/ROCm). ' + str(e))
-
-            if not self.pynvmlLoaded and not self.pyamdLoaded and amdsmi is not None:
-                try:
-                    amdsmi.amdsmi_init()
-                    self.amdsmi = amdsmi
-                    self.amdsmiLoaded = True
-                    logger.info('amdsmi initialized.')
-                except Exception as e:
-                    logger.error('Could not init amdsmi. ' + str(e))
+                    logger.info('Could not init pyrsmi (AMD/ROCm), using fallback monitoring. ' + str(e))
 
         self.linuxAmdSysfsAvailable, self.linuxAmdCardCount = self._detect_linux_amd_sysfs()
         self.anygpuLoaded = self.pynvmlLoaded or self.pyamdLoaded or self.jtopLoaded or self.amdsmiLoaded or self.linuxAmdSysfsAvailable
@@ -263,7 +276,10 @@ class CGPUInfo:
         root = Path(sysfs_root or '/sys/class/drm')
         if not root.exists():
             return []
-        return sorted([path for path in root.glob('card*/device') if path.is_dir()])
+        return sorted([
+            path for path in root.glob('card*/device')
+            if path.is_dir() and re.fullmatch(r'card\d+', path.parent.name)
+        ])
 
     def _detect_linux_amd_sysfs(self, sysfs_root=None):
         device_paths = self._list_amd_sysfs_device_paths(sysfs_root)
@@ -366,8 +382,24 @@ class CGPUInfo:
     def deviceGetCount(self):
         if self.pynvmlLoaded:
             return self.pynvml.nvmlDeviceGetCount()
+        elif self.amdsmiLoaded:
+            handle_count = len(self._get_amdsmi_handles())
+            if handle_count > 0:
+                return handle_count
+            if self.pyamdLoaded:
+                count = self._quiet_external_logs(rocml.smi_get_device_count)
+                if count > 0:
+                    return count
+            if self.linuxAmdSysfsAvailable:
+                return self.linuxAmdCardCount if self.linuxAmdCardCount > 0 else len(self._list_amd_sysfs_device_paths())
+            return 0
         elif self.pyamdLoaded:
-            return rocml.smi_get_device_count()
+            count = self._quiet_external_logs(rocml.smi_get_device_count)
+            if count > 0:
+                return count
+            if self.linuxAmdSysfsAvailable:
+                return self.linuxAmdCardCount if self.linuxAmdCardCount > 0 else len(self._list_amd_sysfs_device_paths())
+            return 0
         elif self.jtopLoaded:
             # For Jetson devices, we assume there's one GPU
             return 1
@@ -379,6 +411,8 @@ class CGPUInfo:
     def deviceGetHandleByIndex(self, index):
         if self.pynvmlLoaded:
             return self.pynvml.nvmlDeviceGetHandleByIndex(index)
+        elif self.amdsmiLoaded:
+            return index
         elif self.pyamdLoaded:
             return index
         elif self.jtopLoaded:
@@ -400,10 +434,31 @@ class CGPUInfo:
             except UnicodeDecodeError as e:
                 gpuName = 'Unknown GPU (decoding error)'
                 logger.error(f"UnicodeDecodeError: {e}")
+            except Exception as e:
+                logger.debug(f'Could not get NVIDIA GPU name. {e}')
 
             return gpuName
+        elif self.amdsmiLoaded:
+            try:
+                handle = self._get_amdsmi_handle(deviceIndex)
+                if handle is None:
+                    return f'AMD GPU {deviceIndex + 1}'
+                info = self.amdsmi.amdsmi_get_gpu_asic_info(handle)
+                name = info.get('market_name') or info.get('vendor_name') or info.get('asic_serial') or ''
+                return name if name else f'AMD GPU {deviceIndex + 1}'
+            except Exception as e:
+                logger.warning(f'Could not get AMD GPU name via amdsmi. {e}')
+                return f'AMD GPU {deviceIndex + 1}'
         elif self.pyamdLoaded:
-            return rocml.smi_get_device_name(deviceIndex)
+            try:
+                gpuName = self._quiet_external_logs(rocml.smi_get_device_name, deviceIndex)
+                if gpuName:
+                    return gpuName
+            except Exception as e:
+                logger.debug(f'Could not get AMD GPU name via pyrsmi. {e}')
+            if self.linuxAmdSysfsAvailable:
+                return f'AMD GPU {deviceIndex + 1}'
+            return ''
         elif self.linuxAmdSysfsAvailable:
             return f'AMD GPU {deviceIndex + 1}'
         elif self.jtopLoaded:
@@ -421,6 +476,23 @@ class CGPUInfo:
     def systemGetDriverVersion(self):
         if self.pynvmlLoaded:
             return f'NVIDIA Driver: {self.pynvml.nvmlSystemGetDriverVersion()}'
+        elif self.amdsmiLoaded:
+            try:
+                handle = self._get_amdsmi_handle(0)
+                if handle is not None:
+                    info = self.amdsmi.amdsmi_get_gpu_driver_info(handle)
+                    driver_name = info.get('driver_name', 'AMD')
+                    driver_version = info.get('driver_version', 'unknown')
+                    return f'AMD Driver: {driver_name} {driver_version}'
+            except Exception as e:
+                logger.warning(f'Could not get AMD driver version via amdsmi. {e}')
+
+            try:
+                if rocml is not None:
+                    return f'AMD Driver: {self._quiet_external_logs(rocml.smi_get_kernel_version)}'
+            except Exception as e:
+                logger.warning(f'Could not get AMD driver version via pyrsmi fallback. {e}')
+            return 'AMD Driver: unknown'
         elif self.pyamdLoaded:
             try:
                 if rocml is None or getattr(rocml, 'rocm_lib', None) is None:
@@ -440,6 +512,21 @@ class CGPUInfo:
     def deviceGetUtilizationRates(self, deviceHandle):
         if self.pynvmlLoaded:
             return self.pynvml.nvmlDeviceGetUtilizationRates(deviceHandle).gpu
+        elif self.amdsmiLoaded:
+            if self.amdsmiActivityAvailable:
+                try:
+                    handle = self._get_amdsmi_handle(deviceHandle)
+                    if handle is not None:
+                        activity = self.amdsmi.amdsmi_get_gpu_activity(handle)
+                        return activity.get('gfx_activity', activity.get('umc_activity', 0))
+                except Exception as e:
+                    self.amdsmiActivityAvailable = False
+                    logger.debug(f'AMD SMI utilization is unavailable, using sysfs fallback. {e}')
+
+            gpu_utilization = self._read_amd_gpu_busy_percent(deviceHandle)
+            if gpu_utilization is not None:
+                return gpu_utilization
+            return 0
         elif self.linuxAmdSysfsAvailable:
             gpu_utilization = self._read_amd_gpu_busy_percent(deviceHandle)
             if gpu_utilization is not None:
@@ -462,6 +549,20 @@ class CGPUInfo:
         if self.pynvmlLoaded:
             mem = self.pynvml.nvmlDeviceGetMemoryInfo(deviceHandle)
             return {'total': mem.total, 'used': mem.used}
+        elif self.amdsmiLoaded:
+            try:
+                handle = self._get_amdsmi_handle(deviceHandle)
+                if handle is not None:
+                    total = self.amdsmi.amdsmi_get_gpu_memory_total(handle, self.amdsmi.AmdSmiMemoryType.VRAM)
+                    used = self.amdsmi.amdsmi_get_gpu_memory_usage(handle, self.amdsmi.AmdSmiMemoryType.VRAM)
+                    return {'total': total, 'used': used}
+            except Exception as e:
+                logger.warning(f'Could not get AMD GPU memory via amdsmi. {e}')
+
+            mem_info = self._read_amd_vram_info(deviceHandle)
+            if mem_info is not None:
+                return mem_info
+            return {'total': 1, 'used': 1}
         elif self.linuxAmdSysfsAvailable:
             mem_info = self._read_amd_vram_info(deviceHandle)
             if mem_info is not None:
@@ -482,6 +583,25 @@ class CGPUInfo:
     def deviceGetTemperature(self, deviceHandle):
         if self.pynvmlLoaded:
             return self.pynvml.nvmlDeviceGetTemperature(deviceHandle, self.pynvml.NVML_TEMPERATURE_GPU)
+        elif self.amdsmiLoaded:
+            temperature = self._get_amdsmi_temperature(deviceHandle)
+            if temperature is not None:
+                return temperature
+
+            temperature = self._read_amd_temperature(deviceHandle)
+            if temperature is not None:
+                return temperature
+
+            if self.pyamdLoaded:
+                try:
+                    if rocml is None or getattr(rocml, 'rocm_lib', None) is None:
+                        return -1
+                    temp = c_int64(0)
+                    rocml.rocm_lib.rsmi_dev_temp_metric_get(deviceHandle, 1, 0, byref(temp))
+                    return temp.value / 1000
+                except Exception as e:
+                    logger.warning(f'Could not get AMD GPU temperature via pyrsmi fallback. {e}')
+            return -1
         elif self.linuxAmdSysfsAvailable:
             temperature = self._read_amd_temperature(deviceHandle)
             if temperature is not None:
@@ -489,28 +609,6 @@ class CGPUInfo:
             return -1
         elif self.pyamdLoaded:
             try:
-                if self.amdsmiLoaded and self.amdsmi is not None:
-                    try:
-                        handles = self.amdsmi.amdsmi_get_processor_handles()
-                        handle = handles[deviceHandle] if deviceHandle < len(handles) else handles[0]
-                        return self.amdsmi.amdsmi_get_temp_metric(
-                            handle,
-                            self.amdsmi.AmdSmiTemperatureType.EDGE,
-                            self.amdsmi.AmdSmiTemperatureMetric.CURRENT,
-                        )
-                    except Exception:
-                        try:
-                            handles = self.amdsmi.amdsmi_get_processor_handles()
-                            handle = handles[deviceHandle] if deviceHandle < len(handles) else handles[0]
-                            return self.amdsmi.amdsmi_get_temp_metric(
-                                handle,
-                                self.amdsmi.AmdSmiTemperatureType.HOTSPOT,
-                                self.amdsmi.AmdSmiTemperatureMetric.CURRENT,
-                            )
-                        except Exception as e:
-                            logger.warning(f'Could not get AMD GPU temperature via amdsmi. {e}')
-                            return -1
-
                 if rocml is None or getattr(rocml, 'rocm_lib', None) is None:
                     return -1
                 temp = c_int64(0)
@@ -529,6 +627,60 @@ class CGPUInfo:
         else:
             return 0
 
+    def _quiet_external_logs(self, func, *args, **kwargs):
+        previous_disable_level = logging.root.manager.disable
+        logging.disable(logging.CRITICAL)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            logging.disable(previous_disable_level)
+
+    def _get_amdsmi_handles(self, log_failure=True):
+        if not self.amdsmiLoaded or self.amdsmi is None:
+            return self.amdsmiHandles or []
+
+        if self.amdsmiHandles:
+            return self.amdsmiHandles
+        try:
+            self.amdsmiHandles = self._quiet_external_logs(self.amdsmi.amdsmi_get_processor_handles)
+            return self.amdsmiHandles
+        except Exception as e:
+            if log_failure:
+                logger.debug(f'Could not get AMD SMI processor handles. {e}')
+            return []
+
+    def _get_amdsmi_handle(self, deviceIndex):
+        handles = self._get_amdsmi_handles()
+        if not handles:
+            return None
+        return handles[deviceIndex] if deviceIndex < len(handles) else handles[0]
+
+    def _get_amdsmi_temperature(self, deviceIndex):
+        handle = self._get_amdsmi_handle(deviceIndex)
+        if handle is None:
+            return None
+
+        for temperature_type in (
+            self.amdsmi.AmdSmiTemperatureType.EDGE,
+            self.amdsmi.AmdSmiTemperatureType.HOTSPOT,
+        ):
+            try:
+                temperature = self.amdsmi.amdsmi_get_temp_metric(
+                    handle,
+                    temperature_type,
+                    self.amdsmi.AmdSmiTemperatureMetric.CURRENT,
+                )
+                return float(temperature) / 1000.0 if temperature > 1000 else float(temperature)
+            except Exception as e:
+                logger.warning(f'Could not get AMD SMI temperature metric {temperature_type}. {e}')
+
+        return None
+
     def close(self):
         if self.jtopLoaded and self.jtopInstance is not None:
             self.jtopInstance.close()
+        if self.amdsmiLoaded and self.amdsmi is not None:
+            try:
+                self.amdsmi.amdsmi_shut_down()
+            except Exception:
+                pass
